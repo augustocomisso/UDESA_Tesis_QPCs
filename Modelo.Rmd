@@ -1,0 +1,3392 @@
+---
+title: "Predicción del incumplimiento de las metas cuantitativas de
+performance en los programas del FMI: un enfoque basado en el aprendizaje automático."
+author: "Augusto A. Comisso"
+output: html_document
+date: "2025"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(smotefamily)
+library(glmnet)
+library(ROCR)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(ranger)
+library(lubridate)
+library(pROC)
+library(shapviz)
+```
+
+# Database
+
+```{r}
+library(readxl)
+base <- read_excel("C:/Users/HP/Desktop/Tesis UDESA/2026 03 29/base3.xlsx")
+
+```
+
+```{r include=FALSE}
+glimpse(base, width=1)
+
+```
+
+```{r}
+base <- base[, -which(names(base) == "Delayedby_NA")]
+base <- base[, -which(names(base) == "Joint_revision")]
+#base <- base[, -which(names(base) == "Sesgo")]
+```
+
+
+```{r}
+summary(base$Status)
+basee <- table(base$Status)
+sum(basee)
+basee
+round(prop.table(basee),3)
+
+```
+
+## Solo QPCs de 2024 para atras (exclusion 2025)
+
+```{r}
+base <- base %>% filter(year(QPC_Test_Date) != 2025)
+
+```
+
+```{r}
+summary(base$Status)
+basee <- table(base$Status)
+sum(basee)
+basee
+round(prop.table(basee),3)
+```
+
+```{r echo=FALSE}
+base <- base %>%
+  mutate(Year = year(QPC_Test_Date)) %>%
+  filter(Year >= 2003 & Year <= 2024)
+
+datos_anuales <- base %>%
+  count(Year, Status) %>%  # Crear conteos si no existen
+  mutate(
+    Year = factor(Year),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(Year) %>%
+  arrange(Year, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+ggplot(datos_anuales, aes(x = Year, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas,
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 2.5,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  labs(x = "", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(
+      family = "sans",  # Esto ya incluye axis.text.x
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 11
+    ),
+    axis.text.y = element_text(family = "sans"),  # Y-axis labels  
+    axis.title = element_text(family = "sans"),   # Axis titles
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+```{r}
+
+datos_anuales <- base %>%
+  count(QPC_Criteria_Order, Status) %>% 
+  mutate(
+    QPC_Criteria_Order = factor(QPC_Criteria_Order),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(QPC_Criteria_Order) %>%
+  arrange(QPC_Criteria_Order, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+# Obtener las etiquetas actuales del factor
+etiquetas_actuales <- levels(datos_anuales$QPC_Criteria_Order)
+
+# Reemplazar las primeras dos etiquetas
+etiquetas_nuevas <- etiquetas_actuales
+etiquetas_nuevas[1] <- "External"
+etiquetas_nuevas[2] <- "Fiscal"
+
+ggplot(datos_anuales, aes(x = QPC_Criteria_Order, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas,
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 3,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  scale_x_discrete(labels = etiquetas_nuevas) +
+  labs(x = "", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(  # Eliminamos la rotación de 90°
+      size = 11
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+```
+
+```{r}
+summary(base$Status)
+basee <- table(base$Status)
+sum(basee)
+basee
+round(prop.table(basee),3)
+```
+
+```{r}
+base %>% filter(QPC_Criteria_Order == 32) %>% pull(Status) %>% summary()
+filtered_table <- table(base$Status[base$QPC_Criteria_Order == 32])
+sum(filtered_table)
+filtered_table
+print(round(prop.table(filtered_table), 3))
+```
+
+## Total programas y países
+
+```{r}
+length(unique(base$Country.Code))
+length(unique(base$Arrangement.Number))
+```
+
+```{r}
+prog_totales <- sort(unique(base$Arrangement.Number))
+prog_totales
+```
+
+```{r}
+sort(unique(base$Country.Code))
+```
+
+## Test GRA-38
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number == 826) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+sort(result)
+
+```
+
+```{r}
+prog_test_gra <- base %>%
+  filter(Arrangement.Number >= "826") %>%
+  distinct(Arrangement.Number) %>%
+  pull(Arrangement.Number)
+sort(prog_test_gra)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% prog_test_gra) %>%
+  select(Arrangement.Number, Arrangement.Type) %>%
+  distinct()
+
+result
+```
+
+```{r}
+
+result <- base %>%
+  filter(Arrangement.Number %in% prog_test_gra) %>%
+  select(Arrangement.Number, Country.Code) %>%
+  distinct()
+
+result
+
+country_count <- result %>%
+  summarise(unique_countries = n_distinct(Country.Code))
+
+print(country_count)
+
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% prog_test_gra) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+```{r}
+length(prog_test_gra)
+```
+
+
+
+## Test GRA-5
+
+```{r}
+sort(unique(subset(base, Country.Code == 213)$Arrangement.Number))
+## [1] 508 510 770 826
+# Ukraine
+sort(unique(subset(base, Country.Code == 926)$Arrangement.Number))
+## [1] 599 652 711 724 799 858
+# Egypt
+sort(unique(subset(base, Country.Code == 469)$Arrangement.Number))
+## [1] 752 800 847
+# Pakistan
+sort(unique(subset(base, Country.Code == 564)$Arrangement.Number))
+## [1] 604 703 781 872
+# Ecuador
+sort(unique(subset(base, Country.Code == 248)$Arrangement.Number))
+## [1] 777 801 886
+
+```
+
+### Argentina (GRA-1)
+
+```{r}
+# Argentina
+sort(unique(subset(base, 
+                   Country.Code == 213 & 
+                   year(QPC_Test_Date) <= 2024 & 
+                   year(QPC_Test_Date) >= 2022)$Arrangement.Number))
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(826)) %>%
+  select(Arrangement.Number, Arrangement.Type) %>%
+  distinct()
+
+result
+```
+
+```{r}
+
+result <- base %>%
+  filter(Arrangement.Number %in% c(826)) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(826)) %>%
+  select(QPC_Test_Date, R, Status, QPC_Original_Amount) %>%
+  arrange(QPC_Test_Date)
+
+print(result)
+```
+
+### Ukraine
+
+```{r}
+# Ukraine
+sort(unique(subset(base, 
+                   Country.Code == 926 & 
+                   year(QPC_Test_Date) <= 2024 & 
+                   year(QPC_Test_Date) >= 2022)$Arrangement.Number))
+```
+
+```{r}
+
+result <- base %>%
+  filter(Arrangement.Number %in% c(858)) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(858)) %>%
+  select(QPC_Test_Date, R, Status, QPC_Original_Amount) %>%
+  arrange(QPC_Test_Date)
+
+print(result)
+```
+
+### Egypt
+
+```{r}
+# Egypt
+sort(unique(subset(base, 
+                   Country.Code == 469 & 
+                   year(QPC_Test_Date) <= 2024 & 
+                   year(QPC_Test_Date) >= 2022)$Arrangement.Number))
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(847)) %>%
+  select(Arrangement.Number, Arrangement.Type) %>%
+  distinct()
+
+result
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number == 847) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+sort(result)
+
+```
+
+### Pakistan
+
+```{r}
+# Pakistan
+sort(unique(subset(base, 
+                   Country.Code == 564 & 
+                   year(QPC_Test_Date) <= 2024 & 
+                   year(QPC_Test_Date) >= 2022)$Arrangement.Number))
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(781, 872)) %>%
+  select(Arrangement.Number, Arrangement.Type) %>%
+  distinct()
+
+result
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(781)) %>%
+  select(QPC_Test_Date, R, Status, QPC_Original_Amount) %>%
+  arrange(QPC_Test_Date)
+
+print(result)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(872)) %>%
+  select(QPC_Test_Date, R, Status, QPC_Original_Amount) %>%
+  arrange(QPC_Test_Date)
+
+print(result)
+```
+
+### Ecuador
+
+```{r}
+# Ecuador
+sort(unique(subset(base, 
+                   Country.Code == 248 & 
+                   year(QPC_Test_Date) <= 2024 & 
+                   year(QPC_Test_Date) >= 2022)$Arrangement.Number))
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% c(886)) %>%
+  select(QPC_Test_Date, R, Status, QPC_Original_Amount) %>%
+  arrange(QPC_Test_Date)
+
+print(result)
+```
+
+### 5-GRA
+
+```{r}
+prog_test_5gra <- c(
+                    872, #Pakistan
+                    826, #Arg 
+                    858, #Ukraine
+                    847, #Egypt
+                    886  #Ecuador
+                   )
+sort(prog_test_5gra)
+```
+
+```{r}
+length(prog_test_5gra)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% prog_test_5gra) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+## Programas de training final - no solapados con test
+
+```{r}
+# Filtrar programas hasta 2017
+programas_2021_o_menos <- base %>%
+  filter(year(QPC_Test_Date) <= 2021) %>%
+  distinct(Arrangement.Number) %>%
+pull(Arrangement.Number)
+
+# Filtrar programas desde 2018 en adelante
+programas_2022_o_mas <- base %>%
+  filter(year(QPC_Test_Date) >= 2022) %>%
+  distinct(Arrangement.Number) %>%
+  pull(Arrangement.Number)
+
+# Obtener los que están en 2017 o antes y NO en 2018 o después
+train_final <- setdiff(programas_2021_o_menos, programas_2022_o_mas)
+train_final <-  sort(train_final)
+sort(train_final)
+```
+
+```{r}
+length(train_final)
+```
+
+```{r}
+result <- base %>%
+  filter(Arrangement.Number %in% train_final) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+## Program gap test GRA-38 y train final
+
+```{r}
+gap <- setdiff(setdiff(prog_totales, prog_test_gra),train_final)
+
+sort(gap)
+```
+
+```{r}
+length(gap)
+```
+
+```{r}
+programas_usados <- setdiff(prog_totales, gap)
+
+sort(programas_usados)
+```
+
+```{r}
+length(programas_usados)
+```
+
+
+```{r echo=FALSE}
+base2 <- base %>%
+  filter(Arrangement.Number %in% programas_usados)
+
+datos_anuales <- base2 %>%
+  count(Year, Status) %>%  # Crear conteos si no existen
+  mutate(
+    Year = factor(Year),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(Year) %>%
+  arrange(Year, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+ggplot(datos_anuales, aes(x = Year, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas,
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 2.5,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  labs(x = "", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(
+      family = "sans",  # Esto ya incluye axis.text.x
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 11
+    ),
+    axis.text.y = element_text(family = "sans"),  # Y-axis labels  
+    axis.title = element_text(family = "sans"),   # Axis titles
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+
+```{r}
+
+datos_anuales <- base2 %>%
+  count(QPC_Criteria_Order, Status) %>% 
+  mutate(
+    QPC_Criteria_Order = factor(QPC_Criteria_Order),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(QPC_Criteria_Order) %>%
+  arrange(QPC_Criteria_Order, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+# Obtener las etiquetas actuales del factor
+etiquetas_actuales <- levels(datos_anuales$QPC_Criteria_Order)
+
+# Reemplazar las primeras dos etiquetas
+etiquetas_nuevas <- etiquetas_actuales
+etiquetas_nuevas[1] <- "External"
+etiquetas_nuevas[2] <- "Fiscal"
+
+ggplot(datos_anuales, aes(x = QPC_Criteria_Order, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas,
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 3,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  scale_x_discrete(labels = etiquetas_nuevas) +
+  labs(x = "", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(  # Eliminamos la rotación de 90°
+      size = 11
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+```
+
+```{r}
+summary(base2$Status)
+baseeE <- table(base2$Status)
+sum(baseeE)
+baseeE
+round(prop.table(baseeE),3)
+```
+
+## Total programas y países
+
+```{r}
+length(unique(base2$Country.Code))
+length(unique(base2$Arrangement.Number))
+```
+
+## Set validacion
+
+```{r}
+number <- length(train_final)
+number2 <- round(number*0.85)
+number3 <- train_final[number2]
+number3
+```
+
+```{r}
+result <- base2 %>%
+  filter(Arrangement.Number == number3) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+sort(result)
+year_val <- min(year(result))
+year_val
+```
+
+```{r}
+validation_2015_2021 <- base2 %>%
+  filter(Arrangement.Number %in% train_final) %>%  
+  filter(Arrangement.Number >= number3) %>%
+  pull(Arrangement.Number)
+
+validation_2015_2021 <- sort(unique(validation_2015_2021))
+sort(validation_2015_2021)
+```
+
+```{r}
+length(validation_2015_2021)
+```
+
+```{r}
+result <- base2 %>%
+  filter(Arrangement.Number %in% validation_2015_2021) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+## Programas de training inicial -no solapados con validation
+
+```{r}
+# Filtrar programas hasta 2012
+programas_2012_o_menos <- base2 %>%
+  filter(year(QPC_Test_Date) < year_val) %>%
+  distinct(Arrangement.Number) %>%
+  pull(Arrangement.Number)
+
+# Filtrar programas desde 2013 en adelante
+programas_2013_o_mas <- base2 %>%
+  filter(year(QPC_Test_Date) >= year_val) %>%
+  distinct(Arrangement.Number) %>%
+  pull(Arrangement.Number)
+
+# Obtener los que están en 2012 o antes y NO en 2013 o después
+train_inicial_2014_atras <- setdiff(programas_2012_o_menos, programas_2013_o_mas)
+
+train_inicial_2014_atras <- sort(train_inicial_2014_atras)
+sort(train_inicial_2014_atras)
+```
+
+```{r}
+length(train_inicial_2014_atras)
+```
+
+```{r}
+result <- base2 %>%
+  filter(Arrangement.Number %in% train_inicial_2014_atras) %>%
+  distinct(QPC_Test_Date) %>%
+  pull(QPC_Test_Date)
+
+sort(result)
+```
+
+## Traning-validation sets
+
+```{r}
+train_inicial_2014_atras
+```
+
+```{r}
+validation_2015_2021
+```
+
+```{r}
+train_final
+```
+
+## Program gap validation-train
+
+```{r}
+gap <- setdiff(setdiff(train_final, train_inicial_2014_atras),validation_2015_2021)
+
+sort(gap)
+```
+
+```{r}
+length(gap)
+```
+
+## Test sets
+
+```{r}
+sort(prog_test_5gra)
+```
+
+```{r}
+sort(prog_test_gra)
+```
+
+## Tipos de programas
+
+```{r echo=FALSE}
+datos_anuales <- base2 %>%
+  count(Arrangement.Type, Status) %>% 
+  mutate(
+    # Ordenar Arrangement.Type por el total (de mayor a menor)
+    Arrangement.Type = factor(Arrangement.Type),
+    Arrangement.Type = reorder(Arrangement.Type, -n, FUN = sum),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(Arrangement.Type) %>%
+  arrange(Arrangement.Type, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Filtrar etiquetas para mostrar solo en las primeras 4 columnas
+etiquetas_filtradas <- etiquetas %>%
+  filter(as.numeric(Arrangement.Type) <= 4)
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+ggplot(datos_anuales, aes(x = Arrangement.Type, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas_filtradas,  # Usar las etiquetas filtradas
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 2.5,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  labs(x = "Program type", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 11
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+```
+
+```{r echo=FALSE}
+datos_anuales <- base2 %>%
+  count(R, Status) %>% 
+  mutate(
+    R = factor(R),
+    Status = factor(Status)
+  )
+
+# Crear etiquetas en la posición correcta (acumuladas)
+etiquetas <- datos_anuales %>%
+  group_by(R) %>%
+  arrange(R, desc(Status)) %>%
+  mutate(
+    posicion_cumulativa = cumsum(n),
+    posicion_etiqueta = posicion_cumulativa - (n / 2)
+  )
+
+# Filtrar etiquetas para mostrar solo en las primeras 7 columnas
+etiquetas_filtradas <- etiquetas %>%
+  filter(as.numeric(R) <= 7)
+
+# Obtener número único de estados para la paleta de colores
+num_estados <- nlevels(datos_anuales$Status)
+
+ggplot(datos_anuales, aes(x = R, y = n, fill = Status)) +
+  geom_col(position = position_stack(), color = "black", width = 0.7) +
+  geom_text(
+    data = etiquetas_filtradas,  # Usar las etiquetas filtradas
+    aes(y = posicion_etiqueta, label = ifelse(n > 0, n, "")),
+    size = 2.5,
+    family = "sans",
+    color = "white",
+    fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = colorRampPalette(c("#3A5F7F", "#A83232"))(num_estados)
+  ) +
+  labs(x = "", y = "QPCs", fill = "Status") +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 11
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    plot.margin = unit(c(10, 10, 20, 10), "points"),
+    legend.position = "top"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1)))
+
+```
+
+##
+
+```{r include=FALSE}
+
+# FEATURES
+
+base2$Country.Code <- as.numeric(base2$Country.Code)
+base2 <- base2 %>% select(-Key_corta)
+base2 <- base2 %>% select(-Key_min)
+base2 <- base2 %>% select(-QPC_Test_Date)
+base2 <- base2 %>% select(-Year)
+base2 <- base2 %>% select(-Arrangement.Type)
+#base2 <- base2 %>% select(-QPC_Amount_span)
+#base2 <- base2 %>% select(-Revised.Amount)
+#base2 <- base2 %>% select(-QPC_Adjusted_Amount_real)
+#base2 <- base2 %>% select(-QPC_Actual_Amount_real)
+#base2 <- base2 %>% select(-GRA_redux)
+#base2 <- base2 %>% select(-PRGT_redux)
+#base2 <- base2 %>% select(-Purchase_date_span)
+
+base2 <- base2 %>%
+  arrange(Arrangement.Number, Country.Code)
+
+base2$Status <- as.factor(base2$Status)
+
+unique(base2$Status)
+```
+
+```{r include=FALSE}
+glimpse(base2, width=2)
+
+```
+
+# Train-validation-test split
+
+```{r}
+training_prog <- train_inicial_2014_atras
+training_prog
+```
+
+```{r}
+validation_prog <- validation_2015_2021
+validation_prog
+```
+
+```{r}
+training_prog2 <- train_final
+training_prog2
+```
+
+```{r}
+test_prog <- prog_test_5gra
+sort(test_prog)
+```
+
+```{r}
+test_prog2 <- prog_test_gra
+sort(test_prog2)
+```
+
+```{r}
+training_programs <- training_prog
+training_programs2 <- training_prog2
+validation_programs <- validation_prog
+test_programs <- test_prog
+test_programs2 <- test_prog2
+
+
+training_set <- base2 %>% dplyr::filter(Arrangement.Number %in% training_prog)
+training_set2 <- base2 %>% dplyr::filter(Arrangement.Number %in% training_prog2)
+validation_set <- base2 %>% dplyr::filter(Arrangement.Number %in% validation_prog)
+test_set_5_GRA <- base2 %>% dplyr::filter(Arrangement.Number %in% test_prog)
+test_set_GRA <- base2 %>% dplyr::filter(Arrangement.Number %in% test_prog2)
+
+
+training_set <- training_set %>% select(-Arrangement.Number)
+training_set2 <- training_set2 %>% select(-Arrangement.Number)
+validation_set <- validation_set %>% select(-Arrangement.Number)
+test_set_5_GRA <- test_set_5_GRA %>% select(-Arrangement.Number)
+test_set_GRA <- test_set_GRA %>% select(-Arrangement.Number)
+
+
+```
+
+```{r}
+train_table2 <- table(training_set2$Status)
+sum(train_table2)
+round(prop.table(train_table2),3)
+```
+
+```{r}
+train_table <- table(training_set$Status)
+sum(train_table)
+train_table
+round(prop.table(train_table),3)
+```
+
+```{r}
+# Validation set
+val_table <- table(validation_set$Status)
+sum(val_table)
+val_table
+round(prop.table(val_table),3)
+
+```
+
+## Test set
+
+```{r}
+# Test set con solo QPCs externos
+test_set_5_GRA <- test_set_5_GRA %>% filter(QPC_Criteria_Order == 32)
+unique(test_set_5_GRA$QPC_Criteria_Order)
+
+```
+
+```{r}
+#Test set
+test_table <- table(test_set_5_GRA$Status)
+sum(test_table)
+test_table
+round(prop.table(test_table),3)
+```
+
+```{r}
+test_set_GRA <- test_set_GRA %>% filter(QPC_Criteria_Order == 32)
+unique(test_set_GRA$QPC_Criteria_Order)
+
+```
+
+```{r}
+#Test set
+test_table2 <- table(test_set_GRA$Status)
+sum(test_table2)
+test_table2
+round(prop.table(test_table2),3)
+```
+
+```{r}
+#base2 <- base2 %>% select(-QPC_Criteria_Order)
+```
+
+```{r echo=TRUE}
+glimpse(base2, width=2)
+
+```
+
+## Smote (menor desequilibrio en el train set)
+
+```{r}
+train_numeric <- training_set
+train_numeric$Status <- as.factor(train_numeric$Status)
+summary(train_numeric$Status)
+round(prop.table(summary(train_numeric$Status)),3)
+```
+
+```{r}
+prop.table(summary(train_numeric$Status))
+
+library(smotefamily)
+smote_result <- SMOTE(train_numeric[, -which(names(train_numeric) == "Status")],
+                      train_numeric$Status,
+                      K = 5, dup_size = 2)
+
+train <- smote_result$data
+train$Status <- as.factor(train$class)
+train <- train %>% select(-class)
+train <- train %>%
+  relocate(Status, .before = 1)
+
+summary(train$Status)
+round(prop.table(summary(train$Status)),3)
+
+train <- na.omit(train)
+train$Status <- as.factor(train$Status)
+training_set <- train
+```
+
+## Hyperparametros sobre set de validacion
+
+```{r}
+
+p <- ncol(training_set)
+
+p
+round(sqrt(p))
+round(p*0.1)
+round(p*0.3)
+round(p*0.6)
+round(p*0.9)
+
+```
+
+```{r}
+grid <- expand.grid(
+  ntree = c(500, 1000),
+  mtry = unique(pmax(1, c(round(sqrt(p)), round(p*0.1), round(p*0.3)))),
+  nodesize = c(1, 5, 10),
+  maxnodes = c(3, 5, 10)  # NA = sin límite
+)
+```
+
+```{r}
+# levels(training_set$Status)
+# 
+# class_w <- c("0" = 0.5, "1" = 0.5)
+# 
+# freq <- table(training_set$Status)
+# freq
+# sum(freq)
+# length(freq)
+# round(prop.table(summary(training_set$Status)),3)
+# 
+# class_w <- as.numeric((freq)/sum(freq))
+# class_w
+# 
+# class_w_normalized <- class_w / sum(class_w)
+# class_w_normalized
+# 
+# names(class_w_normalized) <- names(freq)
+
+class_w_normalized <- NULL
+
+```
+
+```{r}
+best_metric <- -Inf
+best_params <- NULL
+```
+
+```{r}
+
+for (i in seq_len(nrow(grid))) {
+  params <- grid[i, ]
+  
+  # Build the model with or without classwt
+  if(!is.null(class_w_normalized)) {
+    rf <- randomForest(
+      x = training_set,  # Predictor variables for training
+      y = training_set$Status,       # Response variable for training
+      ntree = params$ntree,
+      mtry = params$mtry,
+      nodesize = params$nodesize,
+      maxnodes = if (is.na(params$maxnodes)) NULL else params$maxnodes,
+      #classwt = class_w_normalized,
+      keep.forest = TRUE,
+      do.trace = FALSE
+    )
+  } else {
+    rf <- randomForest(
+      x = training_set,
+      y = training_set$Status,
+      ntree = params$ntree,
+      mtry = params$mtry,
+      nodesize = params$nodesize,
+      maxnodes = if (is.na(params$maxnodes)) NULL else params$maxnodes,
+      keep.forest = TRUE,
+      do.trace = FALSE
+    )
+  }
+  
+  # Predicción en VALIDACIÓN 
+  
+  prob_val <- predict(rf, newdata = validation_set, type = "prob")[, 2]
+  
+  auc_val <- as.numeric(auc(response = validation_set$Status, predictor = prob_val))
+  
+  if (is.finite(auc_val) && auc_val > best_metric) {
+    best_metric <- auc_val
+    best_params <- params
+  }
+}
+
+cat("Mejores hiperparámetros (según VALIDACIÓN externa):\n")
+print(best_params)
+
+
+```
+
+```{r}
+best_params$mtry
+```
+
+```{r}
+best_params$ntree
+```
+
+```{r}
+best_params$nodesize
+```
+
+```{r}
+best_params$maxnodes
+```
+
+## Ajuste del modelo en train y obtencion del threhold óptimo sobre validation set
+
+```{r}
+
+model1 = randomForest(Status ~ . -QPC_Criteria_Order, 
+                       data = training_set,
+                       ntree = best_params$ntree,
+                       mtry = best_params$mtry,
+                       importance = TRUE,
+                       maxnodes = if (is.na(best_params$maxnodes)) NULL else best_params$maxnodes,
+                       nodesize = best_params$nodesize,
+                       #classwt  = class_w_normalized,
+                       keep.forest = TRUE
+)
+```
+
+```{r}
+model1
+```
+
+```{r}
+plot(model1,
+     main = "", 
+     col = c("#A83232", "#3A5F7F","#A83232"))
+
+legend("topright", 
+       legend = colnames(model1$err.rate), 
+       col = c("#A83232", "#3A5F7F","#A83232"), 
+       lty = 1, 
+       cex = 1, 
+       bty = "n")
+```
+
+```{r}
+varImpPlot(model1, sort = TRUE, n.var = 20, type = 1)
+```
+
+```{r}
+varImpPlot(model1, sort = TRUE, n.var = 20, type = 2)
+```
+
+# Mejor threshold validation
+
+```{r}
+summary(validation_set$Status)
+val_numeric <- validation_set
+xval=val_numeric[,-c(1,1)] 
+```
+
+```{r include=FALSE}
+best_threshold_validation <- 0
+best_f1_validation <- 0
+thresholds <- seq(0, 1, by = 0.01)
+f1_scores <- numeric(length(thresholds))
+
+
+predict0 <- predict(model1, newdata = xval, type = "vote")
+
+
+for (i in seq_along(thresholds)) {
+  
+  current_threshold <- thresholds[i]
+  
+  predict0_enteros <- ifelse(predict0[,2] > current_threshold, 1, 0)
+  
+  confmatrix <- table(factor(validation_set$Status, levels = c(0,1)), 
+                      factor(predict0_enteros, levels = c(0,1)))
+  dimnames(confmatrix) <- list(
+    Actual = c("Actual:0", "Actual:1"),
+    Predicted = c("Pred:0", "Pred:1")
+  )
+  
+  print(confmatrix)
+  
+  sum_access <- sum(validation_set$Totalaccess)
+  
+  validation_set <- validation_set %>%
+    mutate(
+      w = Totalaccess / sum_access,
+      PredictedStatus = predict0_enteros,
+      TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+      FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+      FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+    )
+  
+  weighted_TP <- sum(validation_set$w * validation_set$TP)
+  weighted_FP <- sum(validation_set$w * validation_set$FP)
+  weighted_FN <- sum(validation_set$w * validation_set$FN)
+  weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+  f1_scores[i] <- weighted_F1
+  
+  cat(sprintf("Threshold: %.2f, Weighted F1-W Score: %.7f\n", current_threshold, weighted_F1))
+  
+  if (weighted_F1 > best_f1_validation) {
+    best_f1_validation <- weighted_F1
+    best_threshold_validation <- current_threshold
+  }
+}
+
+cat("\nBest threshold:", best_threshold_validation, "with weighted F1 score:", best_f1_validation, "\n")
+
+results <- data.frame(Threshold = thresholds, F1 = f1_scores)
+best_idx <- which.max(results$F1)
+
+validation_set <- validation_set %>% select(-w)
+validation_set <- validation_set %>% select(-TP)
+validation_set <- validation_set %>% select(-FP)
+validation_set <- validation_set %>% select(-FN)
+validation_set <- validation_set %>% select(-PredictedStatus)
+```
+
+```{r}
+best_threshold_validation
+```
+
+# Performance sobra validacion
+
+```{r}
+val_numeric <- validation_set
+val_numeric$Status <- as.factor(val_numeric$Status)
+unique(val_numeric$Status)
+summary(val_numeric$Status)
+```
+
+```{r}
+predict_vote_model2 = predict (model1 ,newdata =val_numeric, type = "vote")
+predict_vote_model2
+```
+
+```{r}
+predicted_total_enteros=rep(NA,dim(validation_set)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+predicted_total_enteros[aux1]=1
+predicted_total_enteros[aux2]=0
+
+confmatrix <- table(validation_set$Status, predicted_total_enteros)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 2, confmatrix[2, 2], 0)
+TN <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 1, confmatrix[1, 1], 0)
+FP <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 2, confmatrix[1, 2], 0)
+FN <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 1, confmatrix[2, 1], 0)
+
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+library(dplyr)
+
+sum_access <- sum(validation_set$Totalaccess)
+
+validation_set <- validation_set %>%
+  mutate(w = Totalaccess / sum_access)
+
+validation_set$PredictedStatus <- predicted_total_enteros
+
+validation_set <- validation_set %>%
+  mutate(
+    TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+    FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+    FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+  )
+
+weighted_TP <- sum(validation_set$w * validation_set$TP)
+weighted_FP <- sum(validation_set$w * validation_set$FP)
+weighted_FN <- sum(validation_set$w * validation_set$FN)
+
+weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+
+cat(sprintf("Weighted F1 Score: %.7f\n", weighted_F1))
+
+validation_set <- validation_set %>% select(-w)
+validation_set <- validation_set %>% select(-TP)
+validation_set <- validation_set %>% select(-FP)
+validation_set <- validation_set %>% select(-FN)
+validation_set <- validation_set %>% select(-PredictedStatus)
+```
+
+```{r}
+
+library(pROC)
+
+# Predict probabilities using the bagged model
+pred.tit.rf.prob_5cv <- predict(model1, newdata = training_set, type = "prob")
+
+# Convert the predicted probabilities to numeric
+pred.tit.rf.prob_5cv <- as.numeric(pred.tit.rf.prob_5cv[, 1])
+
+# Create the ROC curve using pROC
+rocbag <- pROC::roc(training_set$Status, pred.tit.rf.prob_5cv)
+rocbag
+
+# Plot the ROC curve
+ggroc(rocbag)
+
+
+```
+
+
+## Smote (menor desequilibrio en el train set)
+
+```{r}
+train_numeric <- training_set2
+train_numeric$Status <- as.factor(train_numeric$Status)
+summary(train_numeric$Status)
+round(prop.table(summary(train_numeric$Status)),3)
+```
+
+```{r}
+prop.table(summary(train_numeric$Status))
+
+library(smotefamily)
+smote_result <- SMOTE(train_numeric[, -which(names(train_numeric) == "Status")],
+                      train_numeric$Status,
+                      K = 5, dup_size = 2)
+
+train <- smote_result$data
+train$Status <- as.factor(train$class)
+train <- train %>% select(-class)
+train <- train %>%
+  relocate(Status, .before = 1)
+
+summary(train$Status)
+round(prop.table(summary(train$Status)),3)
+
+train <- na.omit(train)
+train$Status <- as.factor(train$Status)
+training_set2 <- train
+```
+
+# Modelo RF (re-entrenado sobre el nuevo train set)
+
+```{r}
+
+```
+
+
+```{r}
+
+model2 = randomForest(Status ~ . -QPC_Criteria_Order, 
+                       data = training_set2,
+                       ntree = best_params$ntree,
+                       mtry = best_params$mtry,
+                       importance = TRUE,
+                       maxnodes = if (is.na(best_params$maxnodes)) NULL else best_params$maxnodes,
+                       nodesize = best_params$nodesize,
+                       #classwt  = class_w_normalized,
+                       keep.forest = TRUE
+)
+```
+
+```{r}
+model2
+```
+
+```{r}
+plot(model2,
+     main = "", 
+     col = c("#A83232", "#3A5F7F","#A83232"))
+
+legend("topright", 
+       legend = colnames(model2$err.rate), 
+       col = c("#A83232", "#3A5F7F","#A83232"), 
+       lty = 1, 
+       cex = 1, 
+       bty = "n")
+```
+
+```{r}
+varImpPlot(model2,sort = TRUE, n.var = 20, type = 1)
+```
+
+```{r}
+varImpPlot(model2,sort = TRUE, n.var = 20, type = 2)
+```
+
+```{r}
+
+library(pROC)
+
+# Predict probabilities using the bagged model
+pred.tit.rf.prob_5cv <- predict(model2, newdata = training_set2, type = "prob")
+
+# Convert the predicted probabilities to numeric
+pred.tit.rf.prob_5cv <- as.numeric(pred.tit.rf.prob_5cv[, 1])
+
+# Create the ROC curve using pROC
+rocbag <- pROC::roc(training_set2$Status, pred.tit.rf.prob_5cv)
+rocbag
+
+# Plot the ROC curve
+ggroc(rocbag)
+
+
+```
+
+
+
+# Performance en test set 5-GRA (out of sample)
+
+## Performance bajo threshold de validacion
+
+```{r}
+test_numeric <- test_set_5_GRA
+test_numeric$Status <- as.factor(test_numeric$Status)
+unique(test_numeric$Status)
+summary(test_numeric$Status)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_numeric, type = "vote")
+predict_vote_model2
+```
+
+```{r}
+predicted_total_enteros=rep(NA,dim(test_set_5_GRA)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+predicted_total_enteros[aux1]=1
+predicted_total_enteros[aux2]=0
+
+confmatrix <- table(test_set_5_GRA$Status, predicted_total_enteros)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 2, confmatrix[2, 2], 0)
+TN <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 1, confmatrix[1, 1], 0)
+FP <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 2, confmatrix[1, 2], 0)
+FN <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 1, confmatrix[2, 1], 0)
+
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+library(dplyr)
+
+sum_access <- sum(test_set_5_GRA$Totalaccess)
+
+test_set_5_GRA <- test_set_5_GRA %>%
+  mutate(w = Totalaccess / sum_access)
+
+test_set_5_GRA$PredictedStatus <- predicted_total_enteros
+
+test_set_5_GRA <- test_set_5_GRA %>%
+  mutate(
+    TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+    FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+    FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+  )
+
+weighted_TP <- sum(test_set_5_GRA$w * test_set_5_GRA$TP)
+weighted_FP <- sum(test_set_5_GRA$w * test_set_5_GRA$FP)
+weighted_FN <- sum(test_set_5_GRA$w * test_set_5_GRA$FN)
+
+weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+
+cat(sprintf("Weighted F1 Score: %.7f\n", weighted_F1))
+
+test_set_5_GRA <- test_set_5_GRA %>% select(-w)
+test_set_5_GRA <- test_set_5_GRA %>% select(-TP)
+test_set_5_GRA <- test_set_5_GRA %>% select(-FP)
+test_set_5_GRA <- test_set_5_GRA %>% select(-FN)
+test_set_5_GRA <- test_set_5_GRA %>% select(-PredictedStatus)
+
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  predicted_enteros = predicted_total_enteros,
+  actual_status = test_set_5_GRA$Status,
+  Country = test_set_5_GRA$Country.Code
+)
+
+best_threshold_validation
+
+table_df
+
+```
+
+## Best F1W
+
+```{r}
+best_threshold_total <- 0
+best_f1_total <- 0
+thresholds <- seq(0, 1, by = 0.01)
+f1_scores <- numeric(length(thresholds))
+predictions_test <- predict_vote_model2
+```
+
+```{r include=FALSE}
+
+for (i in seq_along(thresholds)) {
+  
+  current_threshold <- thresholds[i]
+  
+  cat("Estructura de predictions_test:\n")
+  print(str(predictions_test))
+  cat("Dimensiones de predictions_test:", dim(predictions_test), "\n")
+  cat("Clase de predictions_test:", class(predictions_test), "\n")
+  
+  if (is.matrix(predictions_test)) {
+    prob_class_1 <- predictions_test[,2]
+    cat("Usando columna 2 de la matriz de predicciones\n")
+  } else {
+    prob_class_1 <- predictions_test
+  }
+  
+  predicted_entero_loop <- ifelse(prob_class_1 > current_threshold, 1, 0)
+  
+  cat("Longitud Status:", length(test_set_5_GRA$Status), "\n")
+  cat("Longitud predicciones:", length(predicted_entero_loop), "\n")
+  
+
+  confmatrix <- table(factor(test_set_5_GRA$Status, levels = c(0,1)), 
+                      factor(predicted_entero_loop, levels = c(0,1)))
+  
+  dimnames(confmatrix) <- list(
+    Actual = c("Actual:0", "Actual:1"),
+    Predicted = c("Pred:0", "Pred:1")
+  )
+  
+  print(confmatrix)
+  
+
+  sum_access <- sum(test_set_5_GRA$Totalaccess)
+  test_set_5_GRA <- test_set_5_GRA %>%
+    mutate(
+      w = Totalaccess / sum_access,
+      PredictedStatus = predicted_entero_loop,
+      TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+      FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+      FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+    )
+  
+  weighted_TP <- sum(test_set_5_GRA$w * test_set_5_GRA$TP)
+  weighted_FP <- sum(test_set_5_GRA$w * test_set_5_GRA$FP)
+  weighted_FN <- sum(test_set_5_GRA$w * test_set_5_GRA$FN)
+  
+  # Calculate weighted F1 score
+  weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+  f1_scores[i] <- weighted_F1
+  
+  cat(sprintf("Threshold: %.2f, Weighted F1 Score: %.7f\n", current_threshold, weighted_F1))
+  
+  # Update best threshold if current F1 is better
+  if (weighted_F1 > best_f1_total) {
+    best_f1_total <- weighted_F1
+    best_threshold_total <- current_threshold
+  }
+}
+
+cat("\nBest threshold:", best_threshold_total, "with weighted F1 score:", best_f1_total, "\n")
+
+results <- data.frame(Threshold = thresholds, F1 = f1_scores)
+best_idx <- which.max(results$F1)
+
+test_set_5_GRA <- test_set_5_GRA %>% select(-w)
+test_set_5_GRA <- test_set_5_GRA %>% select(-TP)
+test_set_5_GRA <- test_set_5_GRA %>% select(-FP)
+test_set_5_GRA <- test_set_5_GRA %>% select(-FN)
+test_set_5_GRA <- test_set_5_GRA %>% select(-PredictedStatus)
+```
+
+```{r}
+best_threshold_total
+best_f1_total
+```
+
+```{r}
+predicted_total_enteros_best=rep(NA,dim(test_set_5_GRA)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+predicted_total_enteros_best[aux1]=1
+predicted_total_enteros_best[aux2]=0
+
+confmatrix <- table(test_set_5_GRA$Status, predicted_total_enteros_best)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 2, confmatrix[2, 2], 0)
+TN <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 1, confmatrix[1, 1], 0)
+FP <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 2, confmatrix[1, 2], 0)
+FN <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 1, confmatrix[2, 1], 0)
+
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  predicted_enteros = predicted_total_enteros_best,
+  actual_status = test_set_5_GRA$Status,
+   Country = test_set_5_GRA$Country.Code
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+results
+results_5GRA <- results
+results_5GRA
+best_f1_5GRA <- best_f1_total
+best_f1_5GRA
+best_threshold_5GRA <- best_threshold_total
+best_threshold_5GRA
+```
+
+```{r}
+library(ggplot2)
+
+
+ggplot(results, aes(x = Threshold, y = F1)) +
+  geom_line(color = "#3A5F7F", size = 1.2) +
+  geom_vline(xintercept = best_threshold_5GRA, 
+             color = "black", 
+             linetype = "dashed", 
+             size = 0.7) +  # Dashed line for best threshold
+  geom_point(
+    data = results[best_idx, ], 
+    aes(x = Threshold, y = F1),
+    color = "black", 
+    size = 3
+  ) +
+  annotate(
+    "text", 
+    x = best_threshold_5GRA, 
+    y = max(results$F1) * 1.2,
+    label = paste0("Best: ", round(best_threshold_5GRA, 2), "\nF1-W: ", round(best_f1_total, 4)),
+    color = "black", 
+    hjust = -0.1,
+    family = "sans",
+    size = 5  # Match font size to theme
+  ) +
+  labs(
+    title = "",  # Removed title to match ROC plot style
+    y = "F1-W Score",
+    x = "Threshold"
+  ) +
+  theme_minimal(base_family = "sans", base_size = 11) +  # Consistent font/size
+  theme(
+    axis.text.x = element_text(
+      angle = 90, 
+      vjust = 0.5, 
+      hjust = 1,
+      family = "sans", 
+      size = 16
+    ),
+    axis.text.y = element_text(
+      family = "sans", 
+      size = 16
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid = element_blank(),  # Remove grid lines (like ROC plot)
+    plot.margin = unit(c(1, 1, 1, 1), "cm")  # Adjust margins
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1)) +
+  ylim(0, 1) +
+  coord_cartesian(clip = "off")  # Prevent text annotation clipping
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_5GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+
+# RF performance prediciendo QPCs de principales deudores del FMI (test set)
+
+```{r}
+# Argentina
+sort(unique(subset(base2, Country.Code == 213)$Arrangement.Number))
+
+# Ukraine
+sort(unique(subset(base2, Country.Code == 926)$Arrangement.Number))
+
+# Egypt
+sort(unique(subset(base2, Country.Code == 469)$Arrangement.Number))
+
+# Pakistan
+sort(unique(subset(base2, Country.Code == 564)$Arrangement.Number))
+
+# Ecuador
+sort(unique(subset(base2, Country.Code == 248)$Arrangement.Number))
+```
+
+## RF performance prediciendo QPCs de Argentina (test set)
+
+```{r}
+test_programs <- c(826)
+test_pais <- base2 %>% dplyr::filter(Arrangement.Number %in% test_programs)
+test_pais <- test_pais %>% filter(QPC_Criteria_Order == 32)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+library(dplyr)
+
+sum_access <- sum(test_pais$Totalaccess)
+
+test_pais <- test_pais %>%
+  mutate(w = Totalaccess / sum_access)
+
+test_pais$PredictedStatus <- pred.tit.bag.label_5cv
+
+test_pais <- test_pais %>%
+  mutate(
+    TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+    FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+    FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+  )
+
+weighted_TP <- sum(test_pais$w * test_pais$TP)
+weighted_FP <- sum(test_pais$w * test_pais$FP)
+weighted_FN <- sum(test_pais$w * test_pais$FN)
+
+weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+
+cat(sprintf("Weighted F1 Score: %.7f\n", weighted_F1))
+
+test_pais <- test_pais %>% select(-w)
+test_pais <- test_pais %>% select(-TP)
+test_pais <- test_pais %>% select(-FP)
+test_pais <- test_pais %>% select(-FN)
+test_pais <- test_pais %>% select(-PredictedStatus)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+library(dplyr)
+
+sum_access <- sum(test_pais$Totalaccess)
+
+test_pais <- test_pais %>%
+  mutate(w = Totalaccess / sum_access)
+
+test_pais$PredictedStatus <- pred.tit.bag.label_5cv
+
+test_pais <- test_pais %>%
+  mutate(
+    TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+    FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+    FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+  )
+
+weighted_TP <- sum(test_pais$w * test_pais$TP)
+weighted_FP <- sum(test_pais$w * test_pais$FP)
+weighted_FN <- sum(test_pais$w * test_pais$FN)
+
+weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+
+cat(sprintf("Weighted F1 Score: %.7f\n", weighted_F1))
+
+test_pais <- test_pais %>% select(-w)
+test_pais <- test_pais %>% select(-TP)
+test_pais <- test_pais %>% select(-FP)
+test_pais <- test_pais %>% select(-FN)
+test_pais <- test_pais %>% select(-PredictedStatus)
+```
+
+```{r}
+best_threshold_total <- 0
+best_f1_total <- 0
+thresholds <- seq(0, 1, by = 0.01)
+f1_scores <- numeric(length(thresholds))
+predictions_test <- predict_vote_model2
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  actual_status = test_pais$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r include=FALSE}
+
+for (i in seq_along(thresholds)) {
+  
+  current_threshold <- thresholds[i]
+  
+  cat("Estructura de predictions_test:\n")
+  print(str(predictions_test))
+  cat("Dimensiones de predictions_test:", dim(predictions_test), "\n")
+  cat("Clase de predictions_test:", class(predictions_test), "\n")
+  
+  if (is.matrix(predictions_test)) {
+    prob_class_1 <- predictions_test[,2]
+    cat("Usando columna 2 de la matriz de predicciones\n")
+  } else {
+    prob_class_1 <- predictions_test
+  }
+  
+  predicted_entero_loop <- ifelse(prob_class_1 > current_threshold, 1, 0)
+  
+  cat("Longitud Status:", length(test_pais$Status), "\n")
+  cat("Longitud predicciones:", length(predicted_entero_loop), "\n")
+  
+
+  confmatrix <- table(factor(test_pais$Status, levels = c(0,1)), 
+                      factor(predicted_entero_loop, levels = c(0,1)))
+  
+  dimnames(confmatrix) <- list(
+    Actual = c("Actual:0", "Actual:1"),
+    Predicted = c("Pred:0", "Pred:1")
+  )
+  
+  print(confmatrix)
+  
+
+  sum_access <- sum(test_pais$Totalaccess)
+  test_pais <- test_pais %>%
+    mutate(
+      w = Totalaccess / sum_access,
+      PredictedStatus = predicted_entero_loop,
+      TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+      FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+      FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+    )
+  
+  weighted_TP <- sum(test_pais$w * test_pais$TP)
+  weighted_FP <- sum(test_pais$w * test_pais$FP)
+  weighted_FN <- sum(test_pais$w * test_pais$FN)
+  
+  # Calculate weighted F1 score
+  weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+  f1_scores[i] <- weighted_F1
+  
+  cat(sprintf("Threshold: %.2f, Weighted F1 Score: %.7f\n", current_threshold, weighted_F1))
+  
+  # Update best threshold if current F1 is better
+  if (weighted_F1 > best_f1_total) {
+    best_f1_total <- weighted_F1
+    best_threshold_total <- current_threshold
+  }
+}
+
+cat("\nBest threshold:", best_threshold_total, "with weighted F1 score:", best_f1_total, "\n")
+
+results <- data.frame(Threshold = thresholds, F1 = f1_scores)
+best_idx <- which.max(results$F1)
+
+test_pais <- test_pais %>% select(-w)
+test_pais <- test_pais %>% select(-TP)
+test_pais <- test_pais %>% select(-FP)
+test_pais <- test_pais %>% select(-FN)
+test_pais <- test_pais %>% select(-PredictedStatus)
+```
+
+```{r}
+library(ggplot2)
+
+
+ggplot(results, aes(x = Threshold, y = F1)) +
+  geom_line(color = "#3A5F7F", size = 1.2) +
+  geom_vline(xintercept = best_threshold_total, 
+             color = "black", 
+             linetype = "dashed", 
+             size = 0.7) +  # Dashed line for best threshold
+  geom_point(
+    data = results[best_idx, ], 
+    aes(x = Threshold, y = F1),
+    color = "black", 
+    size = 3
+  ) +
+  annotate(
+    "text", 
+    x = best_threshold_total, 
+    y = max(results$F1) * 1.2,
+    label = paste0("Best: ", round(best_threshold_total, 2), "\nF1-W: ", round(best_f1_total, 4)),
+    color = "black", 
+    hjust = -0.1,
+    family = "sans",
+    size = 5  # Match font size to theme
+  ) +
+  labs(
+    title = "",  # Removed title to match ROC plot style
+    y = "F1-W Score",
+    x = "Threshold"
+  ) +
+  theme_minimal(base_family = "sans", base_size = 11) +  # Consistent font/size
+  theme(
+    axis.text.x = element_text(
+      angle = 90, 
+      vjust = 0.5, 
+      hjust = 1,
+      family = "sans", 
+      size = 16
+    ),
+    axis.text.y = element_text(
+      family = "sans", 
+      size = 16
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid = element_blank(),  # Remove grid lines (like ROC plot)
+    plot.margin = unit(c(1, 1, 1, 1), "cm")  # Adjust margins
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1)) +
+  ylim(0, 1) +
+  coord_cartesian(clip = "off")  # Prevent text annotation clipping
+```
+
+```{r}
+results
+results_1GRA <- results
+results_1GRA
+best_f1_1GRA <- best_f1_total
+best_f1_1GRA
+best_threshold_1GRA <- best_threshold_total
+best_threshold_1GRA
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_1GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+## RF performance prediciendo QPCs de Ucrania (test set)
+
+```{r}
+sort(unique(subset(base2, Country.Code == 926)$Arrangement.Number))
+test_programs <- c(858)
+test_pais <- base2 %>% dplyr::filter(Arrangement.Number %in% test_programs)
+test_pais <- test_pais %>% filter(QPC_Criteria_Order == 32)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  actual_status = test_pais$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_1GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+## RF performance prediciendo QPCs de Egipto (test set)
+
+```{r}
+sort(unique(subset(base2, Country.Code == 469)$Arrangement.Number))
+test_programs <- c(847)
+test_pais <- base2 %>% dplyr::filter(Arrangement.Number %in% test_programs)
+test_pais <- test_pais %>% filter(QPC_Criteria_Order == 32)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  actual_status = test_pais$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_1GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+## RF performance prediciendo QPCs de Pakistan (test set)
+
+```{r}
+sort(unique(subset(base2, Country.Code == 564)$Arrangement.Number))
+test_programs <- c(872)
+test_pais <- base2 %>% dplyr::filter(Arrangement.Number %in% test_programs)
+test_pais <- test_pais %>% filter(QPC_Criteria_Order == 32)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  actual_status = test_pais$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_1GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+## RF performance prediciendo QPCs de Ecuador (test set)
+
+```{r}
+sort(unique(subset(base, Country.Code == 248)$Arrangement.Number))
+test_programs <-c(886)
+test_pais <- base %>% dplyr::filter(Arrangement.Number %in% test_programs)
+test_pais <- test_pais %>% filter(QPC_Criteria_Order == 32)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_pais, type = "vote")
+
+pred.tit.bag.label_5cv=rep(NA,dim(test_pais)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+pred.tit.bag.label_5cv[aux1]=1
+pred.tit.bag.label_5cv[aux2]=0
+
+all_classes <- c("0", "1")
+real_fact <- factor(test_pais$Status, levels = all_classes)
+pred_fact <- factor(pred.tit.bag.label_5cv, levels = all_classes)
+
+confmatrix <- table(real_fact, pred_fact)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- confmatrix[2, 2]
+TN <- confmatrix[1, 1]
+FP <- confmatrix[1, 2]
+FN <- confmatrix[2, 1]
+
+
+TP 
+TN 
+FP
+FN 
+
+
+# Accuracy
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+# Precision
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+# Recall (Sensitivity)
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+# F1 Score
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  actual_status = test_pais$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_1GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+
+
+# Shapley
+
+```{r}
+# Preparar datos para treeshap
+# Necesitamos convertir el modelo a formato uniforme
+library(treeshap)
+```
+
+```{r}
+# Convertir el modelo RF a formato treeshap
+rf_unified <- randomForest.unify(model2, train)
+
+# Calcular SHAP values
+shap_values <- treeshap(rf_unified, test_set_5_GRA[, -1])  # Excluir la variable objetivo
+
+# Ver estructura de los resultados
+#str(shap_values)
+```
+
+```{r}
+plot_feature_importance(
+  shap_values,
+  max_vars = 15,
+  title = "", #Beeswarm Plot - Importancia de Características
+  subtitle = "" #Basado en valores SHAP
+) +
+  # Cambiar color de las barras
+  geom_bar(stat = "identity", fill = "#3A5F7F") +  # Azul oscuro
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white"),
+    plot.title = element_text(color = "black"),
+    plot.subtitle = element_text(color = "black"),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black")
+  )
+```
+
+```{r}
+# Crear beeswarm plot manualmente
+library(ggplot2)
+
+# Convertir SHAP values a data frame
+shap_df <- as.data.frame(shap_values$shap)
+shap_df$observation <- 1:nrow(shap_df)
+
+# Pivotar a formato largo
+shap_long <- reshape2::melt(shap_df, id.vars = "observation", 
+                           variable.name = "feature", 
+                           value.name = "shap_value")
+
+# Obtener importancia para filtrar top 15
+feature_imp <- aggregate(abs(shap_value) ~ feature, shap_long, mean)
+top_15_features <- head(feature_imp[order(-feature_imp$`abs(shap_value)`), "feature"], 15)
+
+# Filtrar solo top 15
+shap_top15 <- shap_long[shap_long$feature %in% top_15_features, ]
+
+# Crear beeswarm plot
+ggplot(shap_top15, aes(x = shap_value, y = reorder(feature, abs(shap_value)), 
+                      color = shap_value)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  scale_color_gradient2(low = "#A83232", mid = "lightgrey", high = "#3A5F7F", 
+                       midpoint = 0, name = "SHAP Value") +
+  labs(x = "SHAP Value", y = "Características",
+       title = "", #Beeswarm Plot - Importancia de Características
+       subtitle = "")  +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.text = element_text(color = "black"),
+    axis.title = element_text(color = "black"),
+    plot.title = element_text(color = "black"),
+    plot.subtitle = element_text(color = "black"),
+    legend.text = element_text(color = "black"),
+    legend.title = element_text(color = "black")
+  )
+```
+
+```{r}
+# Arg
+which(test_set_5_GRA$Country.Code == 213)
+
+```
+
+```{r}
+ for (i in 1:24) {
+   p <- plot_contribution(shap_values, obs = i, max_vars = 10)
+   print(p)
+ }
+
+```
+
+
+# Performance en test set GRA total (out of sample)
+
+## Performance bajo threshold de validacion
+
+```{r}
+test_numeric <- test_set_GRA
+test_numeric$Status <- as.factor(test_numeric$Status)
+unique(test_numeric$Status)
+summary(test_numeric$Status)
+```
+
+```{r}
+predict_vote_model2 = predict (model2 ,newdata =test_numeric, type = "vote")
+predict_vote_model2
+```
+
+```{r}
+predicted_total_enteros=rep(NA,dim(test_set_GRA)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_validation) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_validation)
+predicted_total_enteros[aux1]=1
+predicted_total_enteros[aux2]=0
+
+confmatrix <- table(test_set_GRA$Status, predicted_total_enteros)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 2, confmatrix[2, 2], 0)
+TN <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 1, confmatrix[1, 1], 0)
+FP <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 2, confmatrix[1, 2], 0)
+FN <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 1, confmatrix[2, 1], 0)
+
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+library(dplyr)
+
+sum_access <- sum(test_set_GRA$Totalaccess)
+
+test_set_GRA <- test_set_GRA %>%
+  mutate(w = Totalaccess / sum_access)
+
+test_set_GRA$PredictedStatus <- predicted_total_enteros
+
+test_set_GRA <- test_set_GRA %>%
+  mutate(
+    TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+    FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+    FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+  )
+
+weighted_TP <- sum(test_set_GRA$w * test_set_GRA$TP)
+weighted_FP <- sum(test_set_GRA$w * test_set_GRA$FP)
+weighted_FN <- sum(test_set_GRA$w * test_set_GRA$FN)
+
+weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+
+cat(sprintf("Weighted F1 Score: %.7f\n", weighted_F1))
+
+test_set_GRA <- test_set_GRA %>% select(-w)
+test_set_GRA <- test_set_GRA %>% select(-TP)
+test_set_GRA <- test_set_GRA %>% select(-FP)
+test_set_GRA <- test_set_GRA %>% select(-FN)
+test_set_GRA <- test_set_GRA %>% select(-PredictedStatus)
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  predicted_enteros = predicted_total_enteros,
+  actual_status = test_set_GRA$Status,
+  Country = test_set_GRA$Country.Code
+)
+
+best_threshold_validation
+
+table_df
+
+```
+
+
+## Best F1W
+
+```{r}
+best_threshold_total <- 0
+best_f1_total <- 0
+thresholds <- seq(0, 1, by = 0.01)
+f1_scores <- numeric(length(thresholds))
+predictions_test <- predict_vote_model2
+```
+
+```{r include=FALSE}
+
+for (i in seq_along(thresholds)) {
+  
+  current_threshold <- thresholds[i]
+  
+  cat("Estructura de predictions_test:\n")
+  print(str(predictions_test))
+  cat("Dimensiones de predictions_test:", dim(predictions_test), "\n")
+  cat("Clase de predictions_test:", class(predictions_test), "\n")
+  
+  if (is.matrix(predictions_test)) {
+    prob_class_1 <- predictions_test[,2]
+    cat("Usando columna 2 de la matriz de predicciones\n")
+  } else {
+    prob_class_1 <- predictions_test
+  }
+  
+  predicted_entero_loop <- ifelse(prob_class_1 > current_threshold, 1, 0)
+  
+  cat("Longitud Status:", length(test_set_GRA$Status), "\n")
+  cat("Longitud predicciones:", length(predicted_entero_loop), "\n")
+  
+
+  confmatrix <- table(factor(test_set_GRA$Status, levels = c(0,1)), 
+                      factor(predicted_entero_loop, levels = c(0,1)))
+  
+  dimnames(confmatrix) <- list(
+    Actual = c("Actual:0", "Actual:1"),
+    Predicted = c("Pred:0", "Pred:1")
+  )
+  
+  print(confmatrix)
+  
+
+  sum_access <- sum(test_set_GRA$Totalaccess)
+  test_set_GRA <- test_set_GRA %>%
+    mutate(
+      w = Totalaccess / sum_access,
+      PredictedStatus = predicted_entero_loop,
+      TP = ifelse(Status == 1 & PredictedStatus == 1, 1, 0),
+      FP = ifelse(Status == 0 & PredictedStatus == 1, 1, 0),
+      FN = ifelse(Status == 1 & PredictedStatus == 0, 1, 0)
+    )
+  
+  weighted_TP <- sum(test_set_GRA$w * test_set_GRA$TP)
+  weighted_FP <- sum(test_set_GRA$w * test_set_GRA$FP)
+  weighted_FN <- sum(test_set_GRA$w * test_set_GRA$FN)
+  
+  # Calculate weighted F1 score
+  weighted_F1 <- (2 * weighted_TP) / (2 * weighted_TP + weighted_FP + weighted_FN)
+  f1_scores[i] <- weighted_F1
+  
+  cat(sprintf("Threshold: %.2f, Weighted F1 Score: %.7f\n", current_threshold, weighted_F1))
+  
+  # Update best threshold if current F1 is better
+  if (weighted_F1 > best_f1_total) {
+    best_f1_total <- weighted_F1
+    best_threshold_total <- current_threshold
+  }
+}
+
+cat("\nBest threshold:", best_threshold_total, "with weighted F1 score:", best_f1_total, "\n")
+
+results <- data.frame(Threshold = thresholds, F1 = f1_scores)
+best_idx <- which.max(results$F1)
+
+test_set_GRA <- test_set_GRA %>% select(-w)
+test_set_GRA <- test_set_GRA %>% select(-TP)
+test_set_GRA <- test_set_GRA %>% select(-FP)
+test_set_GRA <- test_set_GRA %>% select(-FN)
+test_set_GRA <- test_set_GRA %>% select(-PredictedStatus)
+```
+
+```{r}
+best_threshold_total
+best_f1_total
+```
+
+```{r}
+predicted_total_enteros_best=rep(NA,dim(test_set_GRA)[1]) 
+
+aux1=which(predict_vote_model2[,2]>best_threshold_total) 
+aux2=which(predict_vote_model2[,2]<=best_threshold_total)
+predicted_total_enteros_best[aux1]=1
+predicted_total_enteros_best[aux2]=0
+
+confmatrix <- table(test_set_GRA$Status, predicted_total_enteros_best)
+rownames(confmatrix) <- paste("Real", rownames(confmatrix), sep = ":")
+colnames(confmatrix) <- paste("Pred", colnames(confmatrix), sep = ":")
+print(confmatrix)
+
+TP <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 2, confmatrix[2, 2], 0)
+TN <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 1, confmatrix[1, 1], 0)
+FP <- ifelse(nrow(confmatrix) >= 1 & ncol(confmatrix) >= 2, confmatrix[1, 2], 0)
+FN <- ifelse(nrow(confmatrix) >= 2 & ncol(confmatrix) >= 1, confmatrix[2, 1], 0)
+
+accuracy <- (TP + TN) / sum(confmatrix)
+cat("Accuracy:", accuracy, "\n")
+
+precision <- TP / (TP + FP)
+cat("Precision:", precision, "\n")
+
+recall <- TP / (TP + FN)
+cat("Recall:", recall, "\n")
+
+f1_score <- 2 * (precision * recall) / (precision + recall)
+cat("F1 Score:", f1_score, "\n")
+```
+
+```{r}
+table_df <- data.frame(
+  prob_0 = predict_vote_model2[,1],
+  prob_1 = predict_vote_model2[,2],
+  predicted_enteros = predicted_total_enteros_best,
+  actual_status = test_set_GRA$Status
+)
+
+best_threshold_total
+
+table_df
+
+```
+
+```{r}
+library(ggplot2)
+
+
+ggplot(results, aes(x = Threshold, y = F1)) +
+  geom_line(color = "#3A5F7F", size = 1.2) +
+  geom_vline(xintercept = best_threshold_total, 
+             color = "black", 
+             linetype = "dashed", 
+             size = 0.7) +  # Dashed line for best threshold
+  geom_point(
+    data = results[best_idx, ], 
+    aes(x = Threshold, y = F1),
+    color = "black", 
+    size = 3
+  ) +
+  annotate(
+    "text", 
+    x = best_threshold_total, 
+    y = max(results$F1) * 1.2,
+    label = paste0("Best: ", round(best_threshold_total, 2), "\nF1-W: ", round(best_f1_total, 4)),
+    color = "black", 
+    hjust = -0.1,
+    family = "sans",
+    size = 5  # Match font size to theme
+  ) +
+  labs(
+    title = "",  # Removed title to match ROC plot style
+    y = "F1-W Score",
+    x = "Threshold"
+  ) +
+  theme_minimal(base_family = "sans", base_size = 11) +  # Consistent font/size
+  theme(
+    axis.text.x = element_text(
+      angle = 90, 
+      vjust = 0.5, 
+      hjust = 1,
+      family = "sans", 
+      size = 16
+    ),
+    axis.text.y = element_text(
+      family = "sans", 
+      size = 16
+    ),
+    axis.line = element_line(color = "black"),
+    panel.grid = element_blank(),  # Remove grid lines (like ROC plot)
+    plot.margin = unit(c(1, 1, 1, 1), "cm")  # Adjust margins
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1)) +
+  ylim(0, 1) +
+  coord_cartesian(clip = "off")  # Prevent text annotation clipping
+```
+
+```{r}
+results
+results_GRA <- results
+results_GRA
+best_f1_GRA <- best_f1_total
+best_f1_GRA
+best_threshold_GRA <- best_threshold_total
+best_threshold_GRA
+```
+
+```{r}
+ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
+  geom_histogram(
+    bins = 100,
+    boundary = 0,
+    closed = "left",
+    color = "black",
+    alpha = 0.8
+  ) +
+  geom_vline(
+    xintercept = best_threshold_GRA,  # Línea en x = 0.5
+    color = "black",   # Color de la línea
+    linetype = "dashed",  # Estilo de línea (puedes usar "solid", "dashed", "dotted")
+    size = 1,         # Grosor de la línea
+    alpha = 0.7       # Transparencia
+  ) +
+  scale_x_continuous(
+    limits = c(-0.1, 1.1),
+    expand = c(0, 0)
+  ) +
+  scale_fill_manual(
+    values = c("0" = "#3A5F7F", "1" = "#A83232"),
+    name = "Valor de y",
+    labels = c("0", "1")
+  ) +
+  labs(
+    title = "",
+    x = "",
+    y = "Frecuencia"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = c(0.95, 0.95),
+    plot.title = element_text(hjust = 0.5),
+     panel.grid = element_blank()
+  )
+```
+
+# Conclusiones
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Paleta de colores con combinación de color y tipo de línea
+# Nota: El primer color "#A83232" es rojo, no azul
+custom_palette <- c(
+  "ARG" = "#A83232",      # Rojo
+  "GRA" = "#3A5F7F"   # Azul
+)
+
+# Tipos de línea
+line_types <- c(
+  "ARG" = "solid",
+  "GRA" = "solid"
+)
+
+# Combinar datos
+results_combined <- bind_rows(
+  mutate(results_1GRA, Model = "ARG"),
+  mutate(results_GRA, Model = "GRA")
+)
+
+results_combined$Model <- factor(results_combined$Model, 
+                                 levels = names(custom_palette))
+
+# Crear el gráfico con una sola leyenda
+ggplot(results_combined, aes(x = Threshold, y = F1, color = Model, linetype = Model)) +
+  geom_line(size = 1.2) +
+  scale_color_manual(values = custom_palette) +
+  scale_linetype_manual(values = line_types) +
+  geom_vline(xintercept = best_threshold_1GRA, 
+             color = "black", 
+             linetype = "dashed", 
+             size = 0.7, 
+             alpha = 0.7) +
+  geom_point(
+    data = filter(results_combined, Model == "ARG")[best_idx, ], 
+    aes(x = best_threshold_1GRA, y = F1),
+    color = "black", 
+    size = 3,
+    show.legend = FALSE
+  ) +
+  annotate(
+    "text", 
+    x = best_threshold_1GRA, 
+    y = max(results_combined$F1) * 1.2,
+    label = paste0("Best: ", round(best_threshold_1GRA, 2), "\nF1-W: ", round(best_f1_1GRA, 4)),
+    color = "black", 
+    hjust = -0.1,
+    family = "sans",
+    size = 5
+  ) +
+  labs(
+    title = "", 
+    y = "F1-W Score",
+    x = "Threshold",
+    color = "",  # Solo un título para ambas escalas
+    linetype = ""  # Mismo título
+  ) +
+  theme_minimal(base_family = "sans", base_size = 11) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90, 
+      vjust = 0.5, 
+      hjust = 1,
+      family = "sans", 
+      size = 16
+    ),
+    axis.text.y = element_text(
+      family = "sans", 
+      size = 16
+    ),
+    axis.line = element_line(color = "white"),
+    panel.grid = element_blank(),
+    plot.margin = unit(c(1, 1, 1, 1), "cm"),
+    legend.position = c(0.85, 0.45),
+    legend.background = element_rect(fill = "white", color = "white", linewidth = 0.3),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.key.width = unit(2, "cm"),  # Más ancho para mostrar línea y color
+    legend.spacing.y = unit(0.2, "cm")  # Espaciado entre elementos
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.1)) +
+  ylim(0, 1) +
+  coord_cartesian(clip = "off") +
+  guides(
+    color = guide_legend(
+      title = "",
+      nrow = 4,
+      override.aes = list(
+        linetype = line_types[levels(results_combined$Model)],  # Especificar tipos de línea
+        color = custom_palette[levels(results_combined$Model)]  # Especificar colores
+      )
+    )
+  )
+```
+
+```{r}
+
+best_f1_GRA 
+best_threshold_GRA
+
+best_f1_5GRA
+best_threshold_5GRA 
+
+best_f1_1GRA
+best_threshold_1GRA
+```
