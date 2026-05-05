@@ -41,7 +41,7 @@ glimpse(base, width=1)
 ```{r}
 base <- base[, -which(names(base) == "Delayedby_NA")]
 base <- base[, -which(names(base) == "Joint_revision")]
-#base <- base[, -which(names(base) == "Sesgo")]
+#base <- base[, -which(names(base) == "Purchaseschedule_Original")]
 ```
 
 
@@ -675,7 +675,7 @@ length(unique(base2$Arrangement.Number))
 
 ```{r}
 number <- length(train_final)
-number2 <- round(number*0.85)
+number2 <- round(number*0.9)
 number3 <- train_final[number2]
 number3
 ```
@@ -922,6 +922,7 @@ base2 <- base2 %>% select(-Arrangement.Type)
 #base2 <- base2 %>% select(-GRA_redux)
 #base2 <- base2 %>% select(-PRGT_redux)
 #base2 <- base2 %>% select(-Purchase_date_span)
+
 
 base2 <- base2 %>%
   arrange(Arrangement.Number, Country.Code)
@@ -1394,13 +1395,13 @@ validation_set <- validation_set %>% select(-PredictedStatus)
 library(pROC)
 
 # Predict probabilities using the bagged model
-pred.tit.rf.prob_5cv <- predict(model1, newdata = training_set, type = "prob")
+pred.train1 <- predict(model1, newdata = training_set, type = "prob")
 
 # Convert the predicted probabilities to numeric
-pred.tit.rf.prob_5cv <- as.numeric(pred.tit.rf.prob_5cv[, 1])
+pred.train1 <- as.numeric(pred.train1[, 1])
 
 # Create the ROC curve using pROC
-rocbag <- pROC::roc(training_set$Status, pred.tit.rf.prob_5cv)
+rocbag <- pROC::roc(training_set$Status, pred.train1)
 rocbag
 
 # Plot the ROC curve
@@ -1418,6 +1419,14 @@ train_numeric$Status <- as.factor(train_numeric$Status)
 summary(train_numeric$Status)
 round(prop.table(summary(train_numeric$Status)),3)
 ```
+
+```{r}
+train_numeric5 <- training_set2[training_set2$QPC_Criteria_Order == 32, ]
+train_numeric5$Status <- as.factor(train_numeric5$Status)
+summary(train_numeric5$Status)
+round(prop.table(table(train_numeric5$Status)), 3)
+```
+
 
 ```{r}
 prop.table(summary(train_numeric$Status))
@@ -1492,13 +1501,13 @@ varImpPlot(model2,sort = TRUE, n.var = 20, type = 2)
 library(pROC)
 
 # Predict probabilities using the bagged model
-pred.tit.rf.prob_5cv <- predict(model2, newdata = training_set2, type = "prob")
+pred.train2 <- predict(model2, newdata = training_set2, type = "prob")
 
 # Convert the predicted probabilities to numeric
-pred.tit.rf.prob_5cv <- as.numeric(pred.tit.rf.prob_5cv[, 1])
+pred.train2 <- as.numeric(pred.train2[, 1])
 
 # Create the ROC curve using pROC
-rocbag <- pROC::roc(training_set2$Status, pred.tit.rf.prob_5cv)
+rocbag <- pROC::roc(training_set2$Status, pred.train2)
 rocbag
 
 # Plot the ROC curve
@@ -2941,8 +2950,10 @@ which(test_set_5_GRA$Country.Code == 213)
 ```
 
 ```{r}
- for (i in 1:24) {
-   p <- plot_contribution(shap_values, obs = i, max_vars = 10)
+ for (i in 1:12) {
+   p <- plot_contribution(shap_values, obs = i, max_vars = 10)+
+     labs(title = NULL)
+   
    print(p)
  }
 
@@ -3279,6 +3290,9 @@ ggplot(table_df, aes(x = prob_1, fill = factor(actual_status))) +
   )
 ```
 
+
+
+
 # Conclusiones
 
 ```{r}
@@ -3378,6 +3392,150 @@ ggplot(results_combined, aes(x = Threshold, y = F1, color = Model, linetype = Mo
     )
   )
 ```
+
+```{r}
+
+library(pROC)
+
+# Predict probabilities using the bagged model
+pred.test <- predict(model2, newdata = test_set_GRA, type = "prob")
+
+# Convert the predicted probabilities to numeric
+pred.test <- as.numeric(pred.test[, 1])
+
+# Create the ROC curve using pROC
+rocbag <- pROC::roc(test_set_GRA$Status, pred.test)
+rocbag
+
+# Plot the ROC curve
+ggroc(rocbag)
+
+
+```
+
+```{r}
+library(pROC)
+library(ggplot2)
+
+
+pred.bag <- predict(model1, newdata = training_set, type = "prob")
+pred.bag <- as.numeric(pred.bag[, 1])
+roc_bag <- pROC::roc(training_set$Status, pred.bag)
+
+
+ggroc(list(`Train Inicial` = roc_bag), 
+      size = 1.2, alpha = 0.8) +
+  geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1), 
+               linetype = "dashed", color = "black", size = 0.8) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  labs(title = "",
+       x = "Specificity",
+       y = "Sensitivity") +
+  theme_minimal() +
+  theme(legend.position = c(0.85, 0.45),
+        legend.background = element_blank(),
+        panel.grid = element_blank(),
+        legend.title = element_blank(),
+        axis.line = element_line(color = "grey", size = 0.8)) +
+  scale_color_manual(values = c("Train Inicial" = "#3A5F7F")) +
+  annotate("text", x = 0.25, y = 0.15, 
+           label = paste("Train Inicial AUC:", round(auc(roc_bag), 3)), 
+           color = "#3A5F7F", hjust = 0, size = 3.5)
+
+
+```
+
+
+```{r}
+library(pROC)
+library(ggplot2)
+
+
+pred.bag <- predict(model1, newdata = training_set, type = "prob")
+pred.bag <- as.numeric(pred.bag[, 1])
+roc_bag <- pROC::roc(training_set$Status, pred.bag)
+
+pred.rf <- predict(model2, newdata = training_set2, type = "prob")
+pred.rf <- as.numeric(pred.rf[, 1])
+roc_rf <- pROC::roc(training_set2$Status, pred.rf)
+
+ggroc(list(`Train Inicial` = roc_bag, 
+           `Train Final` = roc_rf), 
+      size = 1.2, alpha = 0.8) +
+  geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1), 
+               linetype = "dashed", color = "black", size = 0.8) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  labs(title = "",
+       x = "Specificity",
+       y = "Sensitivity") +
+  theme_minimal() +
+  theme(legend.position = c(0.85, 0.45),
+        legend.background = element_blank(),
+        panel.grid = element_blank(),
+        legend.title = element_blank(),
+        axis.line = element_line(color = "grey", size = 0.8)) +
+  scale_color_manual(values = c("Train Inicial" = "#3A5F7F", 
+                                 "Train Final" = "#A83232")) +
+  annotate("text", x = 0.25, y = 0.15, 
+           label = paste("Train Inicial AUC:", round(auc(roc_bag), 3)), 
+           color = "#3A5F7F", hjust = 0, size = 3.5) +
+  annotate("text", x = 0.25, y = 0.08, 
+           label = paste("Train Final AUC:", round(auc(roc_rf), 3)), 
+           color = "#A83232", hjust = 0, size = 3.5) 
+
+```
+
+
+```{r}
+library(pROC)
+library(ggplot2)
+
+
+pred.bag <- predict(model1, newdata = training_set, type = "prob")
+pred.bag <- as.numeric(pred.bag[, 1])
+roc_bag <- pROC::roc(training_set$Status, pred.bag)
+
+pred.rf <- predict(model2, newdata = training_set2, type = "prob")
+pred.rf <- as.numeric(pred.rf[, 1])
+roc_rf <- pROC::roc(training_set2$Status, pred.rf)
+
+pred.test <- predict(model2, newdata = test_set_GRA, type = "prob")
+pred.test <- as.numeric(pred.test[, 1])
+roc_test <- pROC::roc(test_set_GRA$Status, pred.test)
+
+ggroc(list(`Train Inicial` = roc_bag, 
+           `Train Final` = roc_rf, 
+           `Test` = roc_test), 
+      size = 1.2, alpha = 0.8) +
+  geom_segment(aes(x = 1, y = 0, xend = 0, yend = 1), 
+               linetype = "dashed", color = "black", size = 0.8) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", size = 0.8) +
+  labs(title = "",
+       x = "Specificity",
+       y = "Sensitivity") +
+  theme_minimal() +
+  theme(legend.position = c(0.85, 0.45),
+        legend.background = element_blank(),
+        panel.grid = element_blank(),
+        legend.title = element_blank(),
+        axis.line = element_line(color = "grey", size = 0.8)) +
+  scale_color_manual(values = c("Train Inicial" = "#3A5F7F", 
+                                 "Train Final" = "#A83232", 
+                                 "Test" = "darkgrey")) +
+  annotate("text", x = 0.25, y = 0.15, 
+           label = paste("Train Inicial AUC:", round(auc(roc_bag), 3)), 
+           color = "#3A5F7F", hjust = 0, size = 3.5) +
+  annotate("text", x = 0.25, y = 0.08, 
+           label = paste("Train Final AUC:", round(auc(roc_rf), 3)), 
+           color = "#A83232", hjust = 0, size = 3.5) +
+  annotate("text", x = 0.25, y = 0.01, 
+           label = paste("Test AUC:", round(auc(roc_test), 3)), 
+           color = "darkgrey", hjust = 0, size = 3.5)
+```
+
 
 ```{r}
 
